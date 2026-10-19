@@ -22,6 +22,24 @@ npm start
 
 环境变量：`DATABASE_URL`、`AUTH_ISSUER`、`AUTH_PORT`、`AUTH_MASTER_KEY`（32字节 base64，用于加密 JWKS 私钥，生产必设且不可丢失）、`SEED_ADMIN_PASSWORD`。
 
+## Docker 部署（推荐）
+
+```bash
+# 仓库根目录
+export AUTH_MASTER_KEY=$(openssl rand -base64 32)
+docker compose up -d --build   # 自带 postgres 17 + 自动迁移
+# 首次初始化种子数据（admin 用户 + client 注册）：
+docker compose exec auth node dist/db/seed.js
+```
+
+## 运维脚本
+
+```bash
+npm run rotate-keys           # JWKS 轮换：新密钥生效，旧公钥保留验签
+npm run rotate-keys -- --retire   # 宽限期后下线旧 kid（旧 token 全部过期后执行）
+npm run cleanup               # 清理过期 code/refresh token/jti 黑名单/审计日志（建议 crontab 每 10 分钟）
+```
+
 ## 端点
 
 - `GET /.well-known/openid-configuration` — OIDC 发现
