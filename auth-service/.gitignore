@@ -1,0 +1,28 @@
+# 依赖
+node_modules/
+
+# 构建产物
+dist/
+
+# 冒烟测试内嵌数据库（含用户数据，禁止入库）
+.smoke-pg/
+
+# 环境变量与密钥
+.env
+.env.*
+!.env.example
+
+# JWKS 私钥导出 / 临时密钥文件
+*.pem
+*.key
+keys/
+
+# 日志
+*.log
+npm-debug.log*
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
