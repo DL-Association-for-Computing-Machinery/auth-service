@@ -4,6 +4,7 @@ import argon2 from 'argon2';
 import { pool, config } from '../config';
 import { sha256 } from '../keys';
 import { audit } from '../audit';
+import { ipRateLimit, isAccountLocked, recordLoginFail, resetLoginFails } from '../rate-limit';
 
 const router = Router();
 
@@ -20,6 +21,10 @@ interface AuthReq {
 
 /** GET /authorize — validates the request, shows login page, keeps tx in a signed cookie. */
 router.get('/authorize', async (req: Request, res: Response) => {
+  if (!ipRateLimit(req.ip || 'unknown')) {
+    await audit(null, req.query.client_id as string, 'rate_limited', req, {});
+    return res.status(429).json({ error: 'rate_limited', error_description: 'too many requests' });
+  }
   const q = req.query as unknown as AuthReq;
   const err = (desc: string) => res.status(400).json({ error: 'invalid_request', error_description: desc });
 
@@ -56,11 +61,22 @@ router.post('/login', async (req: Request, res: Response) => {
 
   const { rows } = await pool.query(`SELECT id, password_hash, status FROM users WHERE username = $1`, [username]);
   const user = rows[0];
+  if (user && (await isAccountLocked(user.id))) {
+    await audit(user.id, tx.client_id, 'login_blocked_locked', req, { username });
+    return res.status(423).json({ error: 'account_locked', error_description: 'account temporarily locked after repeated failures' });
+  }
   const ok = user && user.status === 'active' && (await argon2.verify(user.password_hash, password)).valueOf();
   if (!ok) {
-    await audit(user?.id ?? null, tx.client_id, 'login_fail', req, { username });
+    if (user) {
+      const nowLocked = await recordLoginFail(req, user.id);
+      await audit(user?.id ?? null, tx.client_id, 'login_fail', req, { username, now_locked: nowLocked });
+      if (nowLocked) return res.status(423).json({ error: 'account_locked', error_description: 'account temporarily locked after repeated failures' });
+    } else {
+      await audit(null, tx.client_id, 'login_fail', req, { username });
+    }
     return res.status(401).json({ error: 'invalid_credentials' });
   }
+  await resetLoginFails(user.id);
 
   const code = crypto.randomBytes(32).toString('base64url');
   await pool.query(

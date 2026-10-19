@@ -50,6 +50,7 @@ async function main() {
   process.env.DATABASE_URL = 'postgres://postgres:postgres@localhost:5544/auth';
   process.env.AUTH_PORT = String(PORT);
   process.env.AUTH_ISSUER = `http://localhost:${PORT}`;
+  process.env.IP_RATE_MAX = '200';
   const { pool } = await import('./config');
   const fs = await import('fs');
   for (const f of fs.readdirSync('migrations').filter((f) => f.endsWith('.sql')).sort()) {
@@ -213,6 +214,25 @@ async function main() {
   if (m4.status !== 201 || !JSON.parse(m4.body).client_secret) throw new Error('create client failed: ' + m4.body);
   console.log('✓ register new client (shop-web) via management API');
 
+  // --- M5: brute-force lockout ---
+  // (edit1 login failures: use fresh authorize txs)
+  const doLogin = async (password: string) => {
+    const a = await req('GET', `/authorize?response_type=code&client_id=blog-web&redirect_uri=http://localhost:3001/auth/callback&scope=openid&state=${state}&nonce=abc&code_challenge=${challenge}&code_challenge_method=S256`);
+    const tx = a.body.match(/name="txId" value="([\w-]+)"/)![1];
+    return req('POST', '/login', { body: { txId: tx, username: 'editor1', password }, headers: { cookie: a.setCookie!.map((c: string) => c.split(';')[0]).join('; ') } });
+  };
+  let last;
+  for (let i = 0; i < 5; i++) {
+    last = await doLogin('totally-wrong');
+    if (i < 4 && last.status !== 401) throw new Error(`fail ${i + 1} should be 401, got ${last.status}`);
+  }
+  if (last!.status !== 423) throw new Error('5th failure should trigger 423 lockout, got ' + last!.status);
+  console.log('✓ 5 consecutive failures lock the account (423)');
+  const l3 = await doLogin('Editor#2026!'); // 正确口令也应被拒
+  if (l3.status !== 423) throw new Error('locked account must reject correct password too');
+  console.log('✓ locked account rejects even correct password');
+
+  // admin 解锁后恢复正常（通过管理 API 恢复 status 触发 reset？这里直接用 PATCH status=active 不清锁，验证管理员改密吊销路径已覆盖；解锁走 DB）
   server.kill();
   await pg.stop();
   fs.rmSync('.smoke-pg', { recursive: true, force: true });
