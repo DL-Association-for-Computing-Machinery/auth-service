@@ -8,7 +8,9 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "dev": "tsc && node dist/server.js",
-    "migrate": "node dist/db/migrate.js"
+    "migrate": "node dist/db/migrate.js",
+    "rotate-keys": "node dist/db/rotate-keys.js",
+    "cleanup": "node dist/db/cleanup.js"
   },
   "dependencies": {
     "argon2": "^0.41.1",
