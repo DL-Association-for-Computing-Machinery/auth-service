@@ -189,14 +189,14 @@ async function main() {
   if (m1.status !== 200 || !JSON.parse(m1.body).users.length) throw new Error('list users failed: ' + m1.body);
   console.log('✓ list users via management API');
 
-  const m2 = await req('POST', '/api/users', { body: { username: 'editor1', password: 'Editor#2026!', email: 'e1@example.com', roles: ['editor'] }, headers: { authorization: `Bearer ${tok4.access_token}`, 'content-type': 'application/json' } });
+  const m2 = await req('POST', '/api/users', { body: { username: 'editor2', password: 'Editor#2026!', email: 'e1@example.com', roles: ['editor'] }, headers: { authorization: `Bearer ${tok4.access_token}`, 'content-type': 'application/json' } });
   if (m2.status !== 201) throw new Error('create user failed: ' + m2.body);
   console.log('✓ create user (editor1) via management API');
 
   // 17. new user can login and gets editor role
   const a11 = await req('GET', `/authorize?response_type=code&client_id=blog-web&redirect_uri=http://localhost:3001/auth/callback&scope=openid%20profile%20email&state=${state}&nonce=abc&code_challenge=${challenge}&code_challenge_method=S256`);
   const tx6 = a11.body.match(/name="txId" value="([\w-]+)"/)![1];
-  const a12 = await req('POST', '/login', { body: { txId: tx6, username: 'editor1', password: 'Editor#2026!' }, headers: { cookie: a11.setCookie!.map((c: string) => c.split(';')[0]).join('; ') } });
+  const a12 = await req('POST', '/login', { body: { txId: tx6, username: 'editor2', password: 'Editor#2026!' }, headers: { cookie: a11.setCookie!.map((c: string) => c.split(';')[0]).join('; ') } });
   const code5 = new URL(a12.headers.location).searchParams.get('code')!;
   const blogBasic = Buffer.from('blog-web:blog-web-dev-secret-change-me').toString('base64');
   const t6 = await req('POST', '/token', { body: { grant_type: 'authorization_code', code: code5, redirect_uri: 'http://localhost:3001/auth/callback', code_verifier: verifier }, headers: { authorization: `Basic ${blogBasic}` } });
@@ -219,7 +219,7 @@ async function main() {
   const doLogin = async (password: string) => {
     const a = await req('GET', `/authorize?response_type=code&client_id=blog-web&redirect_uri=http://localhost:3001/auth/callback&scope=openid&state=${state}&nonce=abc&code_challenge=${challenge}&code_challenge_method=S256`);
     const tx = a.body.match(/name="txId" value="([\w-]+)"/)![1];
-    return req('POST', '/login', { body: { txId: tx, username: 'editor1', password }, headers: { cookie: a.setCookie!.map((c: string) => c.split(';')[0]).join('; ') } });
+    return req('POST', '/login', { body: { txId: tx, username: "editor2", password }, headers: { cookie: a.setCookie!.map((c: string) => c.split(';')[0]).join('; ') } });
   };
   let last;
   for (let i = 0; i < 5; i++) {
@@ -233,7 +233,77 @@ async function main() {
   console.log('✓ locked account rejects even correct password');
 
   // admin 解锁后恢复正常（通过管理 API 恢复 status 触发 reset？这里直接用 PATCH status=active 不清锁，验证管理员改密吊销路径已覆盖；解锁走 DB）
+
+  // --- M8: 端到端联调（integration-demo 作为真实 blog 域客户端，模拟浏览器跟随重定向） ---
+  // 先用管理 API 建 e2e 专用用户（避开 M5 已锁定的 editor2）
+  const m5 = await req('POST', '/api/users', { body: { username: 'editor3', password: 'Editor#2026!', roles: ['editor'] }, headers: { authorization: `Bearer ${tok4.access_token}`, 'content-type': 'application/json' } });
+  if (m5.status !== 201) throw new Error('create editor3 failed: ' + m5.body);
+  const demo = spawn(process.execPath, ['dist-examples/integration-demo.js'], {
+    env: { ...process.env, ISSUER: `http://localhost:${PORT}`, PORT: '3001', CLIENT_ID: 'blog-web', REDIRECT_URI: 'http://localhost:3001/auth/callback' },
+    stdio: 'inherit',
+  });
+  await new Promise((r) => setTimeout(r, 1500));
+
+  const jar: Record<string, Record<string, string>> = { auth: {}, blog: {} };
+  const hostJar = (url: string) => (new URL(url).port === String(PORT) ? jar.auth : jar.blog);
+  const cookieHeader = (url: string) => Object.entries(hostJar(url)).map(([k, v]) => `${k}=${v}`).join('; ');
+
+  const get = (url: string, method = 'GET', body?: string): Promise<{ status: number; headers: any; body: string; location?: string }> =>
+    new Promise((resolve, reject) => {
+      const u = new URL(url);
+      const r = http.request({
+        host: u.hostname, port: u.port, path: u.pathname + u.search, method,
+        headers: { ...(cookieHeader(url) ? { cookie: cookieHeader(url) } : {}), ...(body ? { 'content-type': 'application/x-www-form-urlencoded', 'content-length': Buffer.byteLength(body) } : {}) },
+      }, (res) => {
+        let out = '';
+        res.on('data', (c) => (out += c));
+        res.on('end', () => {
+          for (const sc of res.headers['set-cookie'] || []) {
+            const [kv] = sc.split(';');
+            const i = kv.indexOf('=');
+            hostJar(url)[kv.slice(0, i)] = kv.slice(i + 1);
+          }
+          resolve({ status: res.statusCode!, headers: res.headers, body: out, location: res.headers.location as string | undefined });
+        });
+      });
+      r.on('error', reject);
+      if (body) r.write(body);
+      r.end();
+    });
+
+  // 1. demo /login -> 302 -> auth /authorize (login page)
+  const s1 = await get('http://localhost:3001/login');
+  let url = s1.location!;
+  for (let i = 0; i < 3 && s1.status >= 300; i++) {
+    const nx = await get(url);
+    if (nx.status < 300) break;
+    url = nx.location!.startsWith('http') ? nx.location! : `http://localhost:3001${nx.location}`;
+  }
+  const s2 = await get(url);
+  if (s2.status !== 200 || !s2.body.includes('统一登录')) throw new Error('e2e: authorize login page failed ' + s2.status);
+  const txIdE2E = s2.body.match(/name="txId" value="([\w-]+)"/)![1];
+
+  // 2. login as editor1 -> 302 -> blog /auth/callback (follow to session)
+  const configIssuerUrl = `http://localhost:${PORT}`;
+  const s3 = await get(`${configIssuerUrl}/login`, 'POST', `txId=${txIdE2E}&username=editor3&password=Editor#2026!`);
+  if (s3.status !== 302 || !s3.location!.includes('/auth/callback')) throw new Error('e2e: login redirect failed ' + s3.status);
+  const s4 = await get(s3.location!); // callback -> 302 '/'
+  if (s4.status !== 302) throw new Error('e2e: callback failed ' + s4.status + ' ' + s4.body);
+  const s5 = await get(s4.location!.startsWith('http') ? s4.location! : `http://localhost:3001${s4.location}`);
+  const user = JSON.parse(s5.body).user;
+  if (s5.status !== 200 || user.username !== 'editor3') throw new Error('e2e: profile failed ' + s5.body);
+  console.log('✓ e2e: blog domain full login via integration-demo, user =', user.username);
+
+  // 3. logout -> auth /logout
+  const s6 = await get('http://localhost:3001/logout');
+  let lurl = s6.location || '';
+  if (lurl) {
+    const s7 = await get(lurl);
+    if (s7.status !== 200 || !s7.body.includes('已登出')) throw new Error('e2e: logout redirect failed ' + s7.status);
+  }
+  console.log('✓ e2e: unified logout completed');
   server.kill();
+  demo.kill();
   await pg.stop();
   fs.rmSync('.smoke-pg', { recursive: true, force: true });
   console.log('\nALL SMOKE TESTS PASSED');

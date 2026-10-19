@@ -58,7 +58,7 @@ async function authorizationCodeGrant(req: Request, res: Response) {
   if (!verifyPkce(code_verifier, rec.code_challenge)) return errGrant(res, 'invalid_grant', 'PKCE verification failed');
 
   await pool.query(`UPDATE authorization_codes SET used = true WHERE code_hash = $1`, [sha256(code)]);
-  await issueTokens(res, req, rec.user_id, rec.client_id, rec.scope, clientAuth.client.token_lifetime_s);
+  await issueTokens(res, req, rec.user_id, rec.client_id, rec.scope, clientAuth.client.token_lifetime_s, undefined, rec.nonce);
 }
 
 async function refreshTokenGrant(req: Request, res: Response) {
@@ -84,7 +84,7 @@ async function refreshTokenGrant(req: Request, res: Response) {
   await issueTokens(res, req, rt.user_id, rt.client_id, rt.scope, clientAuth.client.token_lifetime_s, rt.family_id);
 }
 
-async function issueTokens(res: Response, req: Request, userId: string, clientId: string, scope: string, accessTtlS: number, familyId?: string) {
+async function issueTokens(res: Response, req: Request, userId: string, clientId: string, scope: string, accessTtlS: number, familyId?: string, nonce?: string | null) {
   const { rows } = await pool.query(
     `SELECT r.code AS role_code FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = $1`, [userId]
   );
@@ -93,7 +93,7 @@ async function issueTokens(res: Response, req: Request, userId: string, clientId
 
   const accessToken = await signToken({ sub: userId, aud, scope, roles, jti: crypto.randomUUID() }, accessTtlS, 'access');
   const idToken = scope.includes('openid')
-    ? await signToken({ sub: userId, aud: clientId, roles }, accessTtlS, 'id')
+    ? await signToken({ sub: userId, aud: clientId, roles, ...(nonce ? { nonce } : {}) }, accessTtlS, 'id')
     : undefined;
 
   const family = familyId || crypto.randomUUID();
