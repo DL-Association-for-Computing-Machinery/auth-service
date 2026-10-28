@@ -20,7 +20,14 @@ node dist/db/seed.js
 npm start
 ```
 
-环境变量：`DATABASE_URL`、`AUTH_ISSUER`、`AUTH_PORT`、`AUTH_MASTER_KEY`（32字节 base64，用于加密 JWKS 私钥，生产必设且不可丢失）、`SEED_ADMIN_PASSWORD`。
+环境变量：`DATABASE_URL`、`AUTH_ISSUER`、`AUTH_PORT`、`AUTH_MASTER_KEY`（32字节 base64，用于加密 JWKS 私钥，生产必设且不可丢失）、`SEED_ADMIN_PASSWORD`、`REDIS_URL`（多实例部署设此项，会话/IP 限流走 Redis 共享；不设则用内存，仅单实例）。
+
+## 多实例部署
+
+- 设 `REDIS_URL` 后，登录会话（`auth_sid`）与 IP 限流计数跨实例共享，可水平扩容（PG 前置负载均衡）
+- 账号锁定与审计本就存 PG，多实例天然一致
+- Redis 故障时：限流 fail-open（放行并告警）、会话降级告警，不影响 token 签发主链路
+- docker compose 已内置 redis:7 服务与 healthcheck
 
 ## Docker 部署（推荐）
 

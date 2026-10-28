@@ -37,6 +37,10 @@ async function req(method: string, path: string, opts: { body?: any; headers?: R
 function b64url(buf: Buffer) { return buf.toString('base64url'); }
 
 async function main() {
+  // 0. 清理上次中断残留的数据目录
+  const fs0 = await import('fs');
+  fs0.rmSync('.smoke-pg', { recursive: true, force: true });
+
   // 1. embedded postgres
   const pg = new EmbeddedPostgres({
     databaseDir: './.smoke-pg',

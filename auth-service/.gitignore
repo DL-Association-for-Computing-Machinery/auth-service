@@ -3,6 +3,10 @@ node_modules/
 
 # 构建产物
 dist/
+dist-examples/
+
+# 测试输出
+smoke.out
 
 # 冒烟测试内嵌数据库（含用户数据，禁止入库）
 .smoke-pg/

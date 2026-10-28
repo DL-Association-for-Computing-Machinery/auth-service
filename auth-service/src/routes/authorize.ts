@@ -21,7 +21,7 @@ interface AuthReq {
 
 /** GET /authorize — validates the request, shows login page, keeps tx in a signed cookie. */
 router.get('/authorize', async (req: Request, res: Response) => {
-  if (!ipRateLimit(req.ip || 'unknown')) {
+  if (!(await ipRateLimit(req.ip || 'unknown'))) {
     await audit(null, req.query.client_id as string, 'rate_limited', req, {});
     return res.status(429).json({ error: 'rate_limited', error_description: 'too many requests' });
   }
@@ -47,7 +47,7 @@ router.get('/authorize', async (req: Request, res: Response) => {
   // stash the transaction for the login POST
   const txId = crypto.randomUUID();
   req.session!.authTx = { ...q, scope, txId };
-  res.cookie('auth_tx', txId, { httpOnly: true, sameSite: 'lax', maxAge: 10 * 60 * 1000 });
+  res.cookie('auth_tx', txId, { httpOnly: true, sameSite: 'lax', secure: config.issuer.startsWith('https'), maxAge: 10 * 60 * 1000 });
 
   res.type('html').send(loginPage(txId, q.client_id));
 });

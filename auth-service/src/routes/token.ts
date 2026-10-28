@@ -40,8 +40,27 @@ router.post('/token', async (req: Request, res: Response) => {
   const grant = req.body.grant_type;
   if (grant === 'authorization_code') return authorizationCodeGrant(req, res);
   if (grant === 'refresh_token') return refreshTokenGrant(req, res);
-  return errGrant(res, 'unsupported_grant_type', 'only authorization_code and refresh_token supported');
+  if (grant === 'client_credentials') return clientCredentialsGrant(req, res);
+  return errGrant(res, 'unsupported_grant_type', 'only authorization_code, refresh_token and client_credentials supported');
 });
+
+/** client_credentials (RFC 6749 §4.4): 机密客户端 M2M，无 refresh token，无用户上下文。 */
+async function clientCredentialsGrant(req: Request, res: Response) {
+  const clientAuth = await authenticateClient(req);
+  if (!clientAuth) return errGrant(res, 'invalid_client', 'client authentication failed');
+  const allowed = clientAuth.client.scopes as string[];
+  const requested = String(req.body.scope || 'openid').split(' ').filter(Boolean);
+  const scope = requested.filter((s) => allowed.includes(s));
+  if (!scope.length) return errGrant(res, 'invalid_scope', 'no requested scope is allowed for client');
+
+  const accessToken = await signToken(
+    { sub: `client:${clientAuth.clientId}`, aud: `${clientAuth.clientId}-api`, scope: scope.join(' '), roles: [], jti: crypto.randomUUID() },
+    clientAuth.client.token_lifetime_s,
+    'access'
+  );
+  await audit(null, clientAuth.clientId, 'client_credentials_issue', req, { scope: scope.join(' ') });
+  res.json({ access_token: accessToken, token_type: 'Bearer', expires_in: clientAuth.client.token_lifetime_s, scope: scope.join(' ') });
+}
 
 async function authorizationCodeGrant(req: Request, res: Response) {
   const clientAuth = await authenticateClient(req);
@@ -81,7 +100,7 @@ async function refreshTokenGrant(req: Request, res: Response) {
 
   // rotation: single-use, mark old, issue new in the same family
   await pool.query(`UPDATE refresh_tokens SET rotated = true WHERE id = $1`, [rt.id]);
-  await issueTokens(res, req, rt.user_id, rt.client_id, rt.scope, clientAuth.client.token_lifetime_s, rt.family_id);
+  await issueTokens(res, req, rt.user_id, rt.client_id, rt.scope, clientAuth.client.token_lifetime_s, rt.family_id, rt.nonce);
 }
 
 async function issueTokens(res: Response, req: Request, userId: string, clientId: string, scope: string, accessTtlS: number, familyId?: string, nonce?: string | null) {
@@ -89,7 +108,7 @@ async function issueTokens(res: Response, req: Request, userId: string, clientId
     `SELECT r.code AS role_code FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = $1`, [userId]
   );
   const roles = rows.map((r) => r.role_code);
-  const aud = scope.includes('roles') ? `${clientId}-api` : `${clientId}-api`;
+  const aud = `${clientId}-api`;
 
   const accessToken = await signToken({ sub: userId, aud, scope, roles, jti: crypto.randomUUID() }, accessTtlS, 'access');
   const idToken = scope.includes('openid')
@@ -99,9 +118,9 @@ async function issueTokens(res: Response, req: Request, userId: string, clientId
   const family = familyId || crypto.randomUUID();
   const refreshToken = crypto.randomBytes(32).toString('base64url');
   await pool.query(
-    `INSERT INTO refresh_tokens (token_hash, user_id, client_id, family_id, scope, expires_at)
-     VALUES ($1,$2,$3,$4,$5, now() + interval '${config.refreshTtlS} seconds')`,
-    [sha256(refreshToken), userId, clientId, family, scope]
+    `INSERT INTO refresh_tokens (token_hash, user_id, client_id, family_id, scope, nonce, expires_at)
+     VALUES ($1,$2,$3,$4,$5,$6, now() + interval '${config.refreshTtlS} seconds')`,
+    [sha256(refreshToken), userId, clientId, family, scope, nonce || null]
   );
   await audit(userId, clientId, 'token_issue', req, { family_id: family });
 

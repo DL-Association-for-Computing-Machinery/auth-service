@@ -19,7 +19,7 @@ const jwks = createRemoteJWKSet(new URL(`${ISSUER}/.well-known/jwks.json`), { co
 const app = express();
 app.use(express.urlencoded({ extended: false }));
 // cookie parser (minimal) — 必须在路由之前
-app.use((req: any, _res, next) => { req.cookies = Object.fromEntries((req.headers.cookie || '').split('; ').map((c) => c.split('=').map(decodeURIComponent) as [string, string]).filter((p) => p.length === 2)); next(); });
+app.use((req: any, _res, next) => { req.cookies = Object.fromEntries((req.headers.cookie || '').split('; ').map((c: string) => c.split('=').map(decodeURIComponent) as [string, string]).filter((p: string[]) => p.length === 2)); next(); });
 
 // 极简内存会话（生产请用 Redis + 加密 Cookie；refresh token 绝不进 localStorage）
 type Session = { userId: string; accessToken: string; refreshToken: string; idToken?: string; expiresAt: number };

@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
-import { pool } from '../config';
-import { sha256, verifyAccessToken } from '../keys';
+import { pool, config } from '../config';
+import { sha256, verifyAccessToken, loadSigningKey } from '../keys';
 import { audit } from '../audit';
 
 const router = Router();
@@ -74,7 +74,11 @@ router.post('/introspect', async (req: Request, res: Response) => {
   try {
     const claims = (await verifyAccessToken(token)) as any;
     const { rows: revoked } = await pool.query(`SELECT 1 FROM revoked_jtis WHERE jti = $1`, [claims.jti]);
-    const { rows: userOk } = await pool.query(`SELECT 1 FROM users WHERE id = $1 AND status = 'active'`, [claims.sub]);
+    // client_credentials token（sub=client:{id}）无对应用户行，跳过用户状态检查
+    const isClientToken = typeof claims.sub === 'string' && claims.sub.startsWith('client:');
+    const { rows: userOk } = isClientToken
+      ? { rows: [1] }
+      : await pool.query(`SELECT 1 FROM users WHERE id = $1 AND status = 'active'`, [claims.sub]);
     return res.json({
       active: !revoked.length && !!userOk.length,
       sub: claims.sub,
@@ -94,17 +98,23 @@ function logout(req: Request, res: Response) {
   const hint = (req.method === 'GET' ? req.query.id_token_hint : req.body?.id_token_hint) as string | undefined;
   const postLogout = (req.method === 'GET' ? req.query.post_logout_redirect_uri : req.body?.post_logout_redirect_uri) as string | undefined;
   const run = async () => {
+    let claims: any = null;
     if (hint) {
-      const { decodeJwt } = await import('jose');
-      const payload = decodeJwt(hint); // hint may be expired; signature enforcement happens at client side
-      const clientId = payload.aud as string;
-      if (payload.sub && clientId) {
-        await pool.query(
-          `UPDATE refresh_tokens SET revoked = true WHERE user_id = $1 AND client_id = $2 AND revoked = false`,
-          [payload.sub, clientId]
-        );
-        await audit(payload.sub as string, clientId, 'logout', req, {});
+      // 必须验签：伪造的 hint 不得触发任意用户 token 吊销（OIDC RP-initiated logout 要求校验 iss/签名）
+      try {
+        const { jwtVerify } = await import('jose');
+        claims = (await jwtVerify(hint, (await loadSigningKey()).publicKey, { issuer: config.issuer, algorithms: ['RS256'] })).payload;
+      } catch {
+        claims = null; // 无效/过期/伪造 hint：不据此吊销，走普通登出页
       }
+    }
+    if (claims?.sub && claims?.aud) {
+      const clientId = claims.aud as string;
+      await pool.query(
+        `UPDATE refresh_tokens SET revoked = true WHERE user_id = $1 AND client_id = $2 AND revoked = false`,
+        [claims.sub, clientId]
+      );
+      await audit(claims.sub as string, clientId, 'logout', req, {});
       if (postLogout) {
         const { rows } = await pool.query(`SELECT post_logout_uris FROM clients WHERE client_id = $1`, [clientId]);
         if (rows[0]?.post_logout_uris?.includes(postLogout)) return res.redirect(302, postLogout);

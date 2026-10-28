@@ -1,27 +1,19 @@
 /**
- * 登录限流 + 账号锁定（M5）。
- * - 每 IP：滑动窗口 10 次授权/登录请求每分钟（内存实现，单实例；多实例部署换 Redis）
- * - 每账号：连续 5 次口令失败锁定 15 分钟（PG 持久化，重启不丢）
+ * 登录限流 + 账号锁定（M5/M6）。
+ * - 每 IP：每分钟 /authorize 请求上限（store.ts 统一实现：内存=滑动窗口单实例；Redis=固定窗口多实例共享）
+ * - 每账号：连续 5 次口令失败锁定 15 分钟（PG 持久化，重启不丢，天然多实例安全）
  */
 import { Request } from 'express';
 import { pool } from './config';
+import { rateStore } from './store';
 
 const WINDOW_MS = 60_000;
 const IP_MAX = Number(process.env.IP_RATE_MAX || 10);
 const FAIL_MAX = 5;
 const LOCK_MIN = 15;
 
-const ipHits = new Map<string, number[]>();
-
-export function ipRateLimit(ip: string): boolean {
-  const now = Date.now();
-  const hits = (ipHits.get(ip) || []).filter((t) => now - t < WINDOW_MS);
-  hits.push(now);
-  ipHits.set(ip, hits);
-  if (ipHits.size > 10_000) { // 防内存膨胀：粗清理
-    for (const [k, v] of ipHits) if (!v.some((t) => now - t < WINDOW_MS)) ipHits.delete(k);
-  }
-  return hits.length <= IP_MAX;
+export async function ipRateLimit(ip: string): Promise<boolean> {
+  return rateStore.hit(ip, WINDOW_MS, IP_MAX);
 }
 
 export async function isAccountLocked(userId: string): Promise<boolean> {
